@@ -13,7 +13,9 @@ with pg_durable 0.2.8 and 0.2.9. Run as a regular OS user.
 
 For the automated version, run `./scripts/check` from the checkout. It holds
 the lock through an empty batch, checks the original ID after release, and
-removes its temporary cluster on success. To control the lock yourself:
+removes its temporary cluster on success. `./scripts/check --cli-errors` tests
+wrong IDs, duplicate submissions, and failed SQL in a separate cluster.
+To control the lock yourself:
 
 **Terminal A**, from this checkout:
 
@@ -60,7 +62,9 @@ COMMIT;
 ```
 
 In **A**, verify the original ID. This waits up to 60 seconds for the workflow
-and then compares every total to its line items in a fresh query:
+and then compares every total to its line items in a fresh query. The write
+counters belong to the orders, so verification refuses to credit a run if you
+launched a second backfill in the same demo.
 
 ```bash
 "$app" verify "$id"

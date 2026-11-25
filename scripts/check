@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+if (( $# > 1 )) || [[ $# == 1 && $1 != --cli-errors ]]; then
+    echo "usage: $0 [--cli-errors]" >&2; exit 2
+fi
 root=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
 cargo build --quiet --locked --manifest-path "$root/Cargo.toml" --target-dir "$root/target"
 app=$root/target/debug/lastrow
@@ -26,6 +29,10 @@ trap cleanup EXIT
 fail() { echo "$*" >&2; exit 1; }
 
 "$cluster" init >/dev/null
+if [[ ${1:-} == --cli-errors ]]; then
+    bash "$root/tests/cli-errors.sh" "$app" "$cluster"
+    exit
+fi
 coproc HOLDER { exec "$cluster" psql -qAt; }
 holder_pid=$HOLDER_PID
 printf '%s\n' 'BEGIN;' 'SELECT id FROM lastrow.orders WHERE id = 17 FOR UPDATE;' >&"${HOLDER[1]}"

@@ -1,4 +1,4 @@
-use postgres::{Client, Config, NoTls, Row};
+use postgres::{Client, Config, NoTls};
 use std::{env, error::Error, process::ExitCode};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -23,14 +23,23 @@ fn start(db: &mut Client) -> Result<()> {
     Ok(())
 }
 
-fn state<'a>(row: &'a Row, id: &str) -> Result<&'a str> {
-    row.try_get::<_, Option<&str>>("state")?
-        .ok_or_else(|| format!("no visible workflow with ID {id}").into())
+fn check_outcome(db: &mut Client, id: &str, state: &str) -> Result<()> {
+    if matches!(state, "failed" | "cancelled") {
+        let row = db.query_one(include_str!("../sql/failure.sql"), &[&id])?;
+        return Err(match row.try_get::<_, Option<&str>>(0)? {
+            Some(detail) => format!("workflow {id} {state}: {detail}"),
+            None => format!("workflow {id} {state}"),
+        }
+        .into());
+    }
+    Ok(())
 }
 
 fn status(db: &mut Client, id: &str) -> Result<()> {
     let row = db.query_one(include_str!("../sql/status.sql"), &[&id])?;
-    let state = state(&row, id)?;
+    let state = row
+        .try_get::<_, Option<&str>>("state")?
+        .ok_or_else(|| format!("no visible workflow with ID {id}"))?;
     let done: i64 = row.try_get("done")?;
     let orders: i64 = row.try_get("orders")?;
     let pending: Vec<i32> = row.try_get("pending")?;
@@ -41,17 +50,20 @@ fn status(db: &mut Client, id: &str) -> Result<()> {
         batch.map_or_else(|| "-".into(), |n| n.to_string()),
         if timer { "running" } else { "off" }
     );
-    if matches!(state, "failed" | "cancelled") {
-        let reason: Option<String> = db.query_one("SELECT df.result($1)", &[&id])?.try_get(0)?;
-        return Err(reason.unwrap_or_else(|| format!("workflow {state}")).into());
-    }
-    Ok(())
+    check_outcome(db, id, state)
 }
 
 fn verify(db: &mut Client, id: &str) -> Result<()> {
-    db.query_one("SELECT df.await_instance($1, 60)", &[&id])?;
+    let outcome = db.query_one("SELECT df.await_instance($1, 60)", &[&id])?;
+    let state: &str = outcome.try_get(0)?;
+    check_outcome(db, id, state)?;
     let row = db.query_one(include_str!("../sql/verify.sql"), &[&id])?;
-    let state = state(&row, id)?;
+    if !row.try_get::<_, bool>("sole_run")? {
+        return Err(format!(
+            "cannot attribute totals to {id}: verification requires that ID to be the only lastrow-totals run in this demo"
+        )
+        .into());
+    }
     let orders: i64 = row.try_get("orders")?;
     let correct: i64 = row.try_get("correct")?;
     let once: i64 = row.try_get("written_once")?;
