@@ -11,9 +11,10 @@ Use Bash, Rust/Cargo, and a local PostgreSQL installation with pg_durable
 installed for the server selected by `pg_config`. Tested on PostgreSQL 17.11
 with pg_durable 0.2.8 and 0.2.9. Run as a regular OS user.
 
-For the automated version, run `./scripts/check` from the checkout. It holds
-the lock through an empty batch, checks the original ID after release, and
-removes its temporary cluster on success. `./scripts/check --cli-errors` tests
+For the automated version, run `./scripts/check` from the checkout (it uses
+GNU `timeout`). It holds the lock until a committed batch actually updates
+zero orders, checks the original ID after release, and removes its temporary
+cluster on success. `./scripts/check --cli-errors` tests
 wrong IDs, duplicate submissions, and failed SQL in a separate cluster.
 To control the lock yourself:
 

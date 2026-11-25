@@ -33,32 +33,41 @@ if [[ ${1:-} == --cli-errors ]]; then
     bash "$root/tests/cli-errors.sh" "$app" "$cluster"
     exit
 fi
+"$cluster" psql -U postgres -q -f "$root/tests/batch-probe.sql"
 coproc HOLDER { exec "$cluster" psql -qAt; }
 holder_pid=$HOLDER_PID
 printf '%s\n' 'BEGIN;' 'SELECT id FROM lastrow.orders WHERE id = 17 FOR UPDATE;' >&"${HOLDER[1]}"
 read -r -t 10 locked <&"${HOLDER[0]}" && [[ $locked == 17 ]] || fail "Order 17 was not locked"
 
-id=$("$app" start)
 deadline=$((SECONDS + 60))
+while_locked() {
+    local remaining=$((deadline - SECONDS))
+    (( remaining > 0 )) || fail "Timed out waiting for an empty batch with 17 locked"
+    timeout --verbose --kill-after=2 "$remaining" "$@"
+}
+id=$(while_locked "$app" start)
 while :; do
-    snapshot=$("$app" status "$id")
+    snapshot=$(while_locked "$app" status "$id")
     if [[ $snapshot == "id=$id state=running done=99/100 pending=[17] batch_rows=0 retry_timer=running" ]]; then
         echo "$snapshot"
         break
     fi
-    if [[ $snapshot == *"state=completed "* ]] || (( SECONDS >= deadline )); then
-        fail "Never observed the empty-batch retry while holding 17: $snapshot"
+    if [[ $snapshot == *"state=completed "* ]]; then
+        fail "Completed while order 17 was still locked: $snapshot"
+    elif [[ $snapshot == *"retry_timer=running" && $snapshot != *"done=99/100 "* ]]; then
+        fail "Started retrying before exhausting the unlocked orders: $snapshot"
     fi
     sleep 0.25
 done
 
-writes=$("$cluster" psql -qAtc 'SELECT count(*) FILTER (WHERE id <> 17 AND update_count = 1),
+writes=$(while_locked "$cluster" psql -qAtc 'SELECT count(*) FILTER (WHERE id <> 17 AND update_count = 1),
     count(*) FILTER (WHERE id = 17 AND update_count = 0) FROM lastrow.orders')
 [[ $writes == '99|1' ]] || fail "Expected 99 single writes and an untouched order 17; got $writes"
-# xmin identifies the transaction that wrote each visible row version.
-largest=$("$cluster" psql -qAtc 'SELECT max(n) FROM (
-    SELECT count(*) AS n FROM lastrow.orders WHERE total_cents IS NOT NULL GROUP BY xmin
-) AS batches')
+commits=$(while_locked "$cluster" psql -qAtc 'WITH commits AS (
+    SELECT tx, sum(written) AS n FROM lastrow.batch_probe GROUP BY tx
+) SELECT n, max(n) OVER () FROM commits ORDER BY tx DESC LIMIT 1')
+IFS='|' read -r last largest <<<"$commits"
+[[ $last == 0 ]] || fail "Timer running without a committed empty UPDATE; latest commit wrote $last"
 (( largest >= 1 && largest <= 10 )) || fail "Expected at most 10 orders per commit; got $largest"
 printf 'COMMIT;\n\\q\n' >&"${HOLDER[1]}"
 wait "$holder_pid"
