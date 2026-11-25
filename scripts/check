@@ -4,7 +4,8 @@ root=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
 cargo build --quiet --locked --manifest-path "$root/Cargo.toml" --target-dir "$root/target"
 app=$root/target/debug/lastrow
 cluster=$root/scripts/cluster
-cd -- "$(mktemp -d)"
+work=$(mktemp -d)
+cd -- "$work"
 work=$(pwd -P)
 
 cleanup() {

@@ -21,14 +21,16 @@ removes its temporary cluster on success. To control the lock yourself:
 cargo build --locked --target-dir target
 app=$PWD/target/debug/lastrow
 cluster=$PWD/scripts/cluster
-cd "$(mktemp -d)"
-"$cluster" init
-printf 'cd %q && %q psql\n' "$PWD" "$cluster"
+work=$(mktemp -d) &&
+  cd -- "$work" &&
+  "$cluster" init &&
+  printf 'cd %q && %q psql\n' "$PWD" "$cluster"
 ```
 
 `init` seeds a fresh, socket-only cluster in `.lastrow` in the current
-directory. No system database or existing demo is reset. In **terminal B**,
-paste the command printed above, then take the lock in psql:
+directory. No system database or existing demo is reset. If setup fails,
+`init` stops its own server and keeps the files for inspection. On success,
+paste the printed command in **terminal B**, then take the lock in psql:
 
 ```sql
 BEGIN;

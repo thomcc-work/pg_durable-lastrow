@@ -15,12 +15,14 @@ if [[ ${1:-} == init ]]; then
         --set "port=$PGPORT" --set shared_preload_libraries=pg_durable \
         --set "pg_durable.host=$state"
     printf '%s\n' "$bin" > "$state/bin"
+    # Only armed for the data directory this invocation just created.
+    trap 'if [[ -f $state/data/postmaster.pid ]]; then "$bin/pg_ctl" -D "$state/data" -m fast -w stop >&2; fi' EXIT
     "$bin/pg_ctl" -D "$state/data" -l "$state/server.log" -w start
     "$bin/psql" -X -v ON_ERROR_STOP=1 -f "$project/sql/setup.sql"
     # CREATE EXTENSION commits before its worker is ready to take submissions.
     for ((i=0; i<100; i++)); do
         ready=$("$bin/psql" -XAt -v ON_ERROR_STOP=1 -c 'SELECT EXISTS (SELECT FROM df._worker_epoch)')
-        if [[ $ready == t ]]; then exit 0; fi
+        if [[ $ready == t ]]; then trap - EXIT; exit 0; fi
         sleep 0.2
     done
     echo "pg_durable worker did not become ready; see $state/server.log" >&2
