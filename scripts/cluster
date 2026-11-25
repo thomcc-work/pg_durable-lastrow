@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+project=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
+state="$(pwd -P)/.lastrow"
+export PGHOST="$state" PGPORT=5432 PGDATABASE=postgres PGUSER=postgres
+unset PGHOSTADDR PGSERVICE PGOPTIONS
+
+if [[ ${1:-} == init ]]; then
+    bin=$(pg_config --bindir)
+    mkdir -m 700 -- "$state"  # Never adopt or reseed an existing cluster.
+    "$bin/initdb" -D "$state/data" -U postgres --no-locale -E UTF8 \
+        --auth-local=trust --auth-host=reject \
+        --set "listen_addresses=" --set "unix_socket_directories=$state" \
+        --set "port=$PGPORT" --set shared_preload_libraries=pg_durable \
+        --set "pg_durable.host=$state"
+    printf '%s\n' "$bin" > "$state/bin"
+    "$bin/pg_ctl" -D "$state/data" -l "$state/server.log" -w start
+    "$bin/psql" -X -v ON_ERROR_STOP=1 -f "$project/sql/setup.sql"
+    # CREATE EXTENSION commits before its worker is ready to take submissions.
+    for ((i=0; i<100; i++)); do
+        ready=$("$bin/psql" -XAt -v ON_ERROR_STOP=1 -c 'SELECT EXISTS (SELECT FROM df._worker_epoch)')
+        if [[ $ready == t ]]; then exit 0; fi
+        sleep 0.2
+    done
+    echo "pg_durable worker did not become ready; see $state/server.log" >&2
+    exit 1
+fi
+
+if [[ ! -f $state/bin ]]; then
+    echo "No initialized cluster here. Run $0 init in the demo directory first." >&2
+    exit 1
+fi
+bin=$(<"$state/bin")
+case ${1:-} in
+    psql) shift; export PGUSER=lastrow_app; exec "$bin/psql" -X -P pager=off -v ON_ERROR_STOP=1 "$@" ;;
+    stop) exec "$bin/pg_ctl" -D "$state/data" -m fast -w stop ;;
+    start) exec "$bin/pg_ctl" -D "$state/data" -l "$state/server.log" -w start ;;
+    *) echo "usage: $0 {init|psql|stop|start}" >&2; exit 2 ;;
+esac
