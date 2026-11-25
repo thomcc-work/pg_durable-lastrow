@@ -9,12 +9,16 @@ until the customer commits.
 
 Use Bash, Rust/Cargo, and a local PostgreSQL installation with pg_durable
 installed for the server selected by `pg_config`. Tested on PostgreSQL 17.11
-with pg_durable 0.2.8. Run as a regular OS user.
+with pg_durable 0.2.8 and 0.2.9. Run as a regular OS user.
+
+For the automated version, run `./scripts/check` from the checkout. It holds
+the lock through an empty batch, checks the original ID after release, and
+removes its temporary cluster on success. To control the lock yourself:
 
 **Terminal A**, from this checkout:
 
 ```bash
-cargo build --locked
+cargo build --locked --target-dir target
 app=$PWD/target/debug/lastrow
 cluster=$PWD/scripts/cluster
 cd "$(mktemp -d)"

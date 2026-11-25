@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd -- "$(dirname -- "$0")/.." && pwd -P)
+cargo build --quiet --locked --manifest-path "$root/Cargo.toml" --target-dir "$root/target"
+app=$root/target/debug/lastrow
+cluster=$root/scripts/cluster
+cd -- "$(mktemp -d)"
+work=$(pwd -P)
+
+cleanup() {
+    local rc=$?
+    if [[ -f .lastrow/data/postmaster.pid ]]; then
+        "$cluster" stop >/dev/null || rc=1
+    fi
+    if (( rc == 0 )); then
+        rm -r -- .lastrow
+        cd /
+        rmdir -- "$work"
+    else
+        echo "Check failed; cluster files retained in $work/.lastrow" >&2
+    fi
+    exit "$rc"
+}
+trap cleanup EXIT
+fail() { echo "$*" >&2; exit 1; }
+
+"$cluster" init >/dev/null
+coproc HOLDER { exec "$cluster" psql -qAt; }
+holder_pid=$HOLDER_PID
+printf '%s\n' 'BEGIN;' 'SELECT id FROM lastrow.orders WHERE id = 17 FOR UPDATE;' >&"${HOLDER[1]}"
+read -r -t 10 locked <&"${HOLDER[0]}" && [[ $locked == 17 ]] || fail "Order 17 was not locked"
+
+id=$("$app" start)
+deadline=$((SECONDS + 60))
+while :; do
+    snapshot=$("$app" status "$id")
+    if [[ $snapshot == "id=$id state=running done=99/100 pending=[17] batch_rows=0 retry_timer=running" ]]; then
+        echo "$snapshot"
+        break
+    fi
+    if [[ $snapshot == *"state=completed "* ]] || (( SECONDS >= deadline )); then
+        fail "Never observed the empty-batch retry while holding 17: $snapshot"
+    fi
+    sleep 0.25
+done
+
+writes=$("$cluster" psql -qAtc 'SELECT count(*) FILTER (WHERE id <> 17 AND update_count = 1),
+    count(*) FILTER (WHERE id = 17 AND update_count = 0) FROM lastrow.orders')
+[[ $writes == '99|1' ]] || fail "Expected 99 single writes and an untouched order 17; got $writes"
+# xmin identifies the transaction that wrote each visible row version.
+largest=$("$cluster" psql -qAtc 'SELECT max(n) FROM (
+    SELECT count(*) AS n FROM lastrow.orders WHERE total_cents IS NOT NULL GROUP BY xmin
+) AS batches')
+(( largest >= 1 && largest <= 10 )) || fail "Expected at most 10 orders per commit; got $largest"
+printf 'COMMIT;\n\\q\n' >&"${HOLDER[1]}"
+wait "$holder_pid"
+
+"$app" verify "$id"
+instances=$("$cluster" psql -qAtc 'SELECT count(*) FROM df.list_instances()')
+[[ $instances == 1 ]] || fail "Expected one submitted workflow; found $instances"
